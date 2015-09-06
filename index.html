@@ -1,0 +1,658 @@
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+body {
+	margin: 0;
+	padding: 0;
+	overflow: hidden;
+}
+#info {
+	font-size: 80%;
+	position: absolute;
+	left: 0; top: 0;
+	padding: 0.5em;
+	background: rgba(255, 255, 255, 0.8);
+}
+#hover {
+	position: absolute;
+	left: 0; bottom: 0;
+	color: #ddd;
+	font-weight: bold;
+}
+#tool {
+	position: absolute;
+	left: 0; bottom: 0;
+	width: 100%;
+	background: rgba(255, 255, 255, 0.8);
+	/* initially hidden */
+	height: 0;
+}
+#tool .content {
+	padding: 0.5em;
+}
+</style>
+<script src="//cdn.bootcss.com/three.js/r71/three.min.js"></script>
+<script src="//cdn.bootcss.com/dat-gui/0.5.1/dat.gui.js"></script>
+<script src="//apps.bdimg.com/libs/jquery/2.1.4/jquery.min.js"></script>
+<script src="js/Tween.js"></script>
+<script src="js/TrackballControls.js"></script>
+</head>
+<body>
+<div id="info"></div>
+<div id="hover"></div>
+<div id="tool">
+	<div class="content">
+		<p><span class="name"></span> <small>(<span class="info"></span>)</small></p>
+		<small class="cps"></small>
+	</div>
+</div>
+<script type="x-shader/x-vertex" id="pointVertexShader">
+	attribute float size;
+	attribute vec3 color;
+	varying vec3 vColor;
+	void main() {
+		vColor = color;
+		vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+		gl_PointSize = size * 500.0 / length(viewPosition.xyz);
+		gl_Position = projectionMatrix * viewPosition;
+	}
+</script>
+<script type="x-shader/x-fragment" id="pointFragmentShader">
+	uniform sampler2D texture;
+	varying vec3 vColor;
+	/*
+	 * distabled
+	 *
+	uniform vec3 fogColor;
+	uniform float fogNear;
+	uniform float fogFar;
+	*/
+	void main() {
+		vec4 color = texture2D(texture, gl_PointCoord) * vec4(vColor, 1.0);
+		if (color.a < 0.5) discard;
+		gl_FragColor = color;
+		/*
+		float depth = gl_FragCoord.z / gl_FragCoord.w;
+		float fogFactor = smoothstep(fogNear, fogFar, depth);
+		gl_FragColor = mix(gl_FragColor, vec4(fogColor, gl_FragColor.w), fogFactor);
+		*/
+	}
+</script>
+<script type="x-shader/x-vertex" id="lineVertexShader">
+	attribute vec4 color;
+	varying vec4 vColor;
+	void main() {
+		vColor = color;
+		gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+	}
+</script>
+<script type="x-shader/x-fragment" id="lineFragmentShader">
+	varying vec4 vColor;
+	void main() {
+		if (vColor.a < 0.999) discard;
+		gl_FragColor = vColor;
+	}
+</script>
+<script>
+
+	function recip(x) {
+		return 1 - 1 / (1 + x)
+	}
+
+	function lerp(a, b, f) {
+		if (Array.isArray(a) && Array.isArray(b))
+			return a.map(function(v, i) {
+				return lerp(v, b[i], f)
+			})
+		return a * (1 - f) + b * f
+	}
+
+	function hypot() {
+		var sum = 0
+		for (var i = 0; i < arguments.length; i ++)
+			sum += arguments[i] * arguments[i]
+		return Math.sqrt(sum)
+	}
+
+	function arrcpy(from, to, offset) {
+		from.forEach(function(v, i) {
+			to[offset + i] = v
+		})
+	}
+
+	function rand() {
+		// https://en.wikipedia.org/wiki/Linear_congruential_generator
+		rand.seed = (rand.seed + 12345) * 1103515245 & 0xffffffff
+		return rand.seed / 0xffffffff
+	}
+
+	console.log('seed: ' + (rand.seed = 482))
+
+</script>
+<script>
+
+	var versions = ['v2', 'v3'],
+		version = location.search.substr(1),
+		gui = new dat.GUI(),
+		config = {
+			minCouplePoints: 45,
+			spriteSize: 8,
+			version: versions.indexOf(version) >= 0 ? version : 'v3',
+		}
+
+	gui.add(config, 'version', ['v2', 'v3']).onChange(function(val) {
+		location.search = val
+	})
+
+	gui.add(config, 'minCouplePoints', 2, 150).onChange(function(val) {
+		setLineFilter(val)
+	})
+
+	gui.add(config, 'spriteSize', 1, 15).onChange(function(val) {
+		if (!points) return
+
+		var pointColorAttr = points.geometry.getAttribute('size')
+		for (var i = 0; i < pointColorAttr.array.length; i ++)
+			pointColorAttr.array[i] = characters[i].size * val
+		pointColorAttr.needsUpdate = true
+
+		raycaster.params.PointCloud.threshold = val / 2
+	})
+
+	config.colors = {
+		'红魔乡':	[234/256,  67/256,  53/256],
+		'妖妖梦': 	[232/256, 159/256, 193/256],
+//		'萃梦想': [],
+		'永夜抄':	[ 52/256, 168/256,  83/256],
+//		'花映塚': 	[],
+		'风神录': 	[ 64/256, 175/256, 181/256],
+//		'绯想天': [],
+		'地灵殿':	[252/256, 189/256,   8/256],
+		'星莲船':	[197/256, 138/256, 255/256],
+//		'非想天则': [],
+//		'文花帖DS': [],
+		'神灵庙':	[  0/256,  64/256, 128/256],
+//		'心绮楼': [],
+		'辉针城':	[128/256, 128/256,   0/256],
+	}
+
+	// http://thwiki.cc/%E5%AE%98%E6%96%B9%E8%A7%92%E8%89%B2%E5%88%97%E8%A1%A8
+	config.games = {
+		'红魔乡': ['蕾米莉亚·斯卡蕾特', '露米娅', '大妖精', '琪露诺', '红美铃',
+			'小恶魔', '帕秋莉·诺蕾姬', '十六夜咲夜', '芙兰朵露·斯卡蕾特',
+			'冴月麟'],
+		'妖妖梦': ['八云紫', '蕾迪·霍瓦特洛克', '橙', '爱丽丝·玛格特洛依德', '莉莉白',
+			'露娜萨·普莉兹姆利巴', '梅露兰·普莉兹姆利巴', '莉莉卡·普莉兹姆利巴',
+			'魂魄妖梦', '西行寺幽幽子', '八云蓝',
+			'魂魄妖忌', '蕾拉·普莉兹姆利巴'],
+		'萃梦想': ['伊吹萃香'],
+		'永夜抄': ['蓬莱山辉夜', '莉格露·奈特巴格', '米斯蒂娅·萝蕾拉', '上白泽慧音', '因幡帝',
+			'铃仙·优昙华院·因幡', '八意永琳', '藤原妹红'],
+		'花映塚': ['射命丸文', '梅蒂欣·梅兰可莉', '风见幽香', '小野塚小町', '四季映姬·亚玛萨那度'],
+		'风神录': ['东风谷早苗', '秋静叶', '秋穰子', '键山雏', '河城荷取', '犬走椛',
+			'八坂神奈子', '洩矢诹访子'],
+		'绯想天': ['比那名居天子', '永江衣玖'],
+		'地灵殿': ['古明地恋', '琪斯美', '黑谷山女', '水桥帕露西', '星熊勇仪', '古明地觉',
+			'火焰猫燐', '灵乌路空'],
+		'星莲船': ['圣白莲', '娜兹玲', '多多良小伞', '云居一轮', '云山', '村纱水蜜', '寅丸星',
+			'封兽鵺', '命莲'],
+		'非想天则': ['大鲶鱼', '太岁星君', '大太法师', '非想天则', '提泰妮娅', '歌利亚人偶'],
+		'文花帖DS': ['姬海棠果'],
+		'神灵庙': ['丰聪耳神子', '幽谷响子', '宫古芳香', '霍青娥', '苏我屠自古', '物部布都',
+			'二岩猯藏'],
+		'心绮楼': ['秦心'],
+		'辉针城': ['少名针妙丸', '若鹭姬', '赤蛮奇', '今泉影狼', '九十九弁弁', '九十九八桥',
+			'鬼人正邪', '堀川雷鼓'],
+	}
+
+	var folder = gui.addFolder('Games')
+	config.show = { }
+	Object.keys(config.games).forEach(function(game) {
+		config.games[game].forEach(function(name) {
+			config.colors[name] = config.colors[game]
+		})
+		config.show[game] = function() {
+			location.hash = config.games[game].join(',')
+		}
+		var a = folder.add(config.show, game),
+			rgb = (config.colors[game] || [1, 1, 1]).map(function(i){
+				return Math.floor(i * 256)
+			}).join(',')
+		$(a.domElement).append('<span style="background:' +
+			'rgb(' + rgb + ')">&nbsp;</span> ' + config.games[game].length)
+	})
+
+</script>
+<script>
+
+	var renderer = new THREE.WebGLRenderer({ antialias: true })
+	renderer.setClearColor(0x222222)
+	renderer.setPixelRatio(window.devicePixelRatio)
+	renderer.setSize(window.innerWidth, window.innerHeight)
+	document.body.appendChild(renderer.domElement)
+
+	var camera = new THREE.PerspectiveCamera(75,
+			window.innerWidth / window.innerHeight, 1, 10000)
+	camera.position.z = 500
+
+	var scene = new THREE.Scene(),
+		spriteScene = new THREE.Scene()
+//	scene.add(new THREE.Mesh(
+//		new THREE.BoxGeometry(200, 200, 200),
+//		new THREE.MeshBasicMaterial({ color:0xff5555, wireframe:true })
+//	))
+
+	window.addEventListener('resize', function(e) {
+		camera.aspect = window.innerWidth / window.innerHeight
+		camera.updateProjectionMatrix()
+		renderer.setSize(window.innerWidth, window.innerHeight)
+	}, false)
+
+	var controls = new THREE.TrackballControls(camera, renderer.domElement),
+		clock = new THREE.Clock()
+	controls.minDistance = 10
+	controls.maxDistance = 2000
+
+	// disable it because we would render two scenes to make sure the sprites are on top
+	// http://stackoverflow.com/questions/13309289/three-js-geometry-in-top-of-another
+	renderer.autoClear = false
+
+	requestAnimationFrame(function animate() {
+		requestAnimationFrame(animate)
+
+		renderer.clear()
+		renderer.render(scene, camera)
+		renderer.clearDepth()
+		renderer.render(spriteScene, camera)
+
+		controls.update(clock.getDelta())
+		TWEEN.update()
+	})
+
+</script>
+<script>
+
+	var points, lines
+
+	function addModels(chars, couples) {
+		var positions = [ ]
+		chars.forEach(function(ch, index) {
+			var r = 10 + Math.sqrt(index) * 20,
+				s = rand() * 2 * Math.PI,
+				p = rand() * 2 * Math.PI,
+				x = r * Math.sin(s) * Math.sin(p),
+				y = r * Math.sin(s) * Math.cos(p),
+				z = r * Math.cos(s)
+			positions.push(x, y, z)
+		})
+
+		var indices = [ ]
+		couples.forEach(function(pair, index) {
+			indices.push.apply(indices, pair.chars)
+		})
+
+		// move points with higher couple points closer
+		for (var j = 0; j < 400; j ++) {
+			for (var i = 0; i < indices.length; i += 2) {
+				var i1 = indices[i],
+					i2 = indices[i + 1],
+					x1 = positions[i1 * 3],
+					y1 = positions[i1 * 3 + 1],
+					z1 = positions[i1 * 3 + 2],
+					x2 = positions[i2 * 3],
+					y2 = positions[i2 * 3 + 1],
+					z2 = positions[i2 * 3 + 2],
+					ie = chars[i1].couples[i2],
+					pt = couples[ie].points,
+					dt = hypot(x1 - x2, y1 - y2, z1 - z2),
+					// if pt~0 then f~1 (no movement)
+					// if pt~max then f~0.5 (moving closer)
+					f = dt < config.spriteSize * 0.5 ? 1.05 : 0.5 + 0.5 / (1 + pt / 10000)
+				positions[i1 * 3]     = x1 * f + x2 * (1 - f)
+				positions[i1 * 3 + 1] = y1 * f + y2 * (1 - f)
+				positions[i1 * 3 + 2] = z1 * f + z2 * (1 - f)
+				positions[i2 * 3]     = x2 * f + x1 * (1 - f)
+				positions[i2 * 3 + 1] = y2 * f + y1 * (1 - f)
+				positions[i2 * 3 + 2] = z2 * f + z1 * (1 - f)
+			}
+		}
+
+		// move the first character to the center
+		var p0 = positions.slice(0, 3)
+		for (var i = 0; i < positions.length; i += 3) {
+			positions[i]     -= p0[0]
+			positions[i + 1] -= p0[1]
+			positions[i + 2] -= p0[2]
+		}
+
+		// make the points sparser
+		for (var i = 0; i < positions.length; i += 3) {
+			var x = positions[i],
+				y = positions[i + 1],
+				z = positions[i + 2],
+				r = Math.sqrt(x * x + y * y + z * z),
+				k = 2 / Math.sqrt(r / 100 + 0.001)
+				positions[i]     *= k
+				positions[i + 1] *= k
+				positions[i + 2] *= k
+		}
+
+		var pointColors = [ ], pointSizes = [ ]
+		chars.forEach(function(ch, index) {
+			ch.position = positions.slice(index * 3, index * 3 + 3)
+			ch.size = 1 + recip(ch.points / 2000) * 4
+			ch.color = config.colors[ch.name] || [1, 1, 1]
+			pointColors.push.apply(pointColors, ch.color)
+			pointSizes.push(ch.size * config.spriteSize)
+		})
+
+		addPoints(positions, pointColors, pointSizes)
+
+		// have to create another position array,
+		// because we want to assign different colors for each segment
+		var lineColors = [ ], linePos = [ ]
+		couples.forEach(function(pair, index) {
+			pair.chars.forEach(function(i) {
+				linePos.push.apply(linePos, positions.slice(i * 3, i * 3 + 3))
+				lineColors.push(1.0, 1.0, 1.0, 1.0)
+			})
+		})
+
+		addLines(linePos, lineColors)
+
+		// setup something else
+
+		setLineFilter(config.minCouplePoints)
+
+		if (location.hash.substr(1))
+			setActiveChar(location.hash.substr(1))
+		else
+			location.hash = characters[0].name
+	}
+
+	function addPoints(positions, colors, sizes) {
+		var geometry = new THREE.BufferGeometry()
+		geometry.addAttribute('position',
+			new THREE.BufferAttribute(new Float32Array(positions), 3))
+		geometry.addAttribute('color',
+			new THREE.BufferAttribute(new Float32Array(colors), 3))
+		geometry.addAttribute('size',
+			new THREE.BufferAttribute(new Float32Array(sizes), 1))
+
+		var material = new THREE.ShaderMaterial({
+			uniforms: {
+				texture:  { type:'t',
+					value:THREE.ImageUtils.loadTexture('textures/disc.png') },
+				/*
+				fogColor: { type:'c', value:renderer.getClearColor() },
+				fogNear:  { type:'f', value:500 },
+				fogFar:   { type:'f', value:800 },
+				*/
+			},
+			attributes: {
+				size:  { type:'f',  value:1  },
+				color: { type:'v3', value:[] },
+			},
+			vertexShader: $('#pointVertexShader').text(),
+			fragmentShader: $('#pointFragmentShader').text(),
+			fog: true,
+		})
+
+		points = new THREE.PointCloud(geometry, material)
+		spriteScene.add(points)
+	}
+
+	function addLines(positions, colors) {
+		var geometry = new THREE.BufferGeometry()
+		geometry.addAttribute('position',
+			new THREE.BufferAttribute(new Float32Array(positions), 3))
+		geometry.addAttribute('color',
+			new THREE.BufferAttribute(new Float32Array(colors), 4))
+
+		var material = new THREE.ShaderMaterial({
+			attributes: {
+				color: { type:'v4', value:[] },
+			},
+			vertexShader: $('#lineVertexShader').text(),
+			fragmentShader: $('#lineFragmentShader').text()
+		})
+
+		lines = new THREE.Line(geometry, material, THREE.LinePieces)
+		scene.add(lines)
+	}
+
+	function setLineFilter(value) {
+		var colorAttr = lines.geometry.getAttribute('color'),
+			colors = colorAttr.array
+		couples.forEach(function(pair, index) {
+			var a = pair.points > value ? 1 : 0
+			colors[index * 2 * 4 + 3] = a
+			colors[index * 2 * 4 + 7] = a
+		})
+		colorAttr.needsUpdate = true
+	}
+
+	// index = charIndex | [charIndex, ...] | "charName,..."
+	function setActiveChar(index) {
+		if (index === +index)
+			index = [ index ]
+		else if (typeof(index) == typeof(''))
+			index = index.split(',').map(function(n) {
+				return characters['i-' + n]
+			}).filter(function(i) {
+				return i === +i
+			})
+
+		var ch = characters[ index[0] ]
+		$('#tool').height(ch ? 'auto' : 0)
+		ch && updateToolInfo(ch)
+
+		// look at the active character
+		if (ch) setTimeout(function() {
+			var currentOffset = camera.position.clone().sub(controls.target),
+				targetOffset = currentOffset.clone().normalize().multiplyScalar(100)
+			controls.enabled = false
+			new TWEEN.Tween(controls.target.toArray().concat(currentOffset.toArray()))
+				.to(ch.position.slice().concat(targetOffset.toArray()), 800)
+				.easing(TWEEN.Easing.Cubic.EaseInOut)
+				.onUpdate(function(e) {
+					controls.target.fromArray(this.slice(0, 3))
+					camera.position.fromArray(this.slice(3, 6)).add(controls.target)
+				})
+				.onComplete(function(e) {
+					controls.enabled = true
+				})
+				.start()
+		})
+
+		function setCharColor(index, color) {
+			index && index.filter(function(index) {
+				return characters[index]
+			}).forEach(function(index) {
+				var ch = characters[index]
+
+				var pointColorAttr = points.geometry.getAttribute('color')
+				arrcpy(color ? lerp(ch.color, color, 0.5) : ch.color, pointColorAttr.array, index * 3)
+				pointColorAttr.needsUpdate = true
+
+				var lineColorAttr = lines.geometry.getAttribute('color')
+				for (var cpIndex in ch.couples) {
+					var edgeIndex = ch.couples[cpIndex]
+					arrcpy(color || [1, 1, 1], lineColorAttr.array, edgeIndex * 2 * 4)
+					arrcpy(color || [1, 1, 1], lineColorAttr.array, edgeIndex * 2 * 4 + 4)
+				}
+				lineColorAttr.needsUpdate = true
+			})
+		}
+
+		if (index + '' !== setActiveChar.lastActiveIndex + '') {
+			setCharColor(setActiveChar.lastActiveIndex)
+			setCharColor(setActiveChar.lastActiveIndex = index, [0.26, 0.53, 0.95])
+		}
+	}
+
+	function setHoverChar(index) {
+
+		var ch = characters[index]
+		$('#hover').html(ch ? ch.name + ' <small>#' + ch.rank + '</small>' : '')
+		$(renderer.domElement).css('cursor', ch ? 'pointer' : 'auto')
+
+		function setCharSize(index, scale) {
+			var ch = characters[index]
+			if (ch) {
+				var pointColorAttr = points.geometry.getAttribute('size')
+				pointColorAttr.array[index] = ch.size * scale
+				pointColorAttr.needsUpdate = true
+			}
+		}
+
+		if (index !== setHoverChar.lastActiveIndex) {
+			setCharSize(setHoverChar.lastActiveIndex, config.spriteSize)
+			setCharSize(setHoverChar.lastActiveIndex = index, config.spriteSize * 1.2)
+		}
+	}
+
+	function updateToolInfo(ch) {
+
+		$('#tool .name').text(ch.name)
+		$('#tool .info').text(ch.points + '   #' + ch.rank)
+
+		$('#tool .cps').empty()
+		Object.keys(ch.couples).map(function(index) {
+			return {
+				name: characters[index].name,
+				points: couples[ ch.couples[index] ].points
+			}
+		}).sort(function(a, b) {
+			return b.points - a.points
+		}).slice(0, 5).forEach(function(c) {
+			$('#tool .cps')
+				.append('<a href="#' + c.name + '">' + c.name + '</a>')
+				.append('<span> <small>(' + c.points + ')</small>&nbsp;</span>')
+		})
+
+	}
+
+	window.addEventListener('hashchange', function(e) {
+		setActiveChar(location.hash.substr(1))
+	})
+
+</script>
+<script>
+
+	var mouse = new THREE.Vector2(),
+		raycaster = new THREE.Raycaster()
+	raycaster.params.PointCloud.threshold = config.spriteSize / 2
+
+	renderer.domElement.addEventListener('mousemove', function(e) {
+		mouse.x = (e.clientX / window.innerWidth) * 2 - 1
+		mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
+
+		if (points) {
+			raycaster.setFromCamera(mouse, camera)
+			var intersects = raycaster.intersectObject(points)
+				index = intersects.length ? intersects[0].index : -1
+			$('#hover').css({
+				left: e.clientX + 5,
+				bottom: window.innerHeight - e.clientY + 5,
+			})
+			setHoverChar(index)
+		}
+	}, false)
+
+	renderer.domElement.addEventListener('mousedown', function(e) {
+		mouse.ex = e.clientX
+		mouse.ey = e.clientY
+	}, true)
+
+	renderer.domElement.addEventListener('mouseup', function(e) {
+		if (mouse.ex !== e.clientX || mouse.ey !== e.clientY)
+			return
+
+		mouse.x = (e.clientX / window.innerWidth) * 2 - 1
+		mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
+
+		if (points) {
+			raycaster.setFromCamera(mouse, camera)
+			var intersects = raycaster.intersectObject(points)
+				index = intersects.length ? intersects[0].index : -1
+			location.hash = characters[index] ? characters[index].name : ''
+		}
+	}, true)
+
+</script>
+<script>
+
+	var characters, couples
+
+	function getTableData(table) {
+		return table.children('tbody').children('tr').get().map(function(e) {
+			return $(e).children('td').get().map(function(e) {
+				return $(e).text()
+			})
+		})
+	}
+
+	$('#info').html('loading data from vote.thwiki.cc...')
+
+	$.when(
+		$.get('data/' + config.version + '-ch.html'),
+		$.get('data/' + config.version + '-cp.html')
+	).then(function(charHtml, coupleHtml) {
+
+		$('#info').html('data source: <a target="_blank" ' +
+			'href="//vote.thwiki.cc">vote.thwiki.cc</a>')
+
+		characters = [ ]
+		getTableData($('#stable', charHtml[0])).filter(function(td) {
+			return td.length
+		}).forEach(function(td, index) {
+			var ch = {
+				name: td[1],
+				points: parseInt(td[2]),
+				rank: parseInt(td[0]),
+				couples: { /* cpIndex -> edgeIndex */ }
+			}
+			characters[index] = ch
+			characters['i-' + ch.name] = index
+		})
+
+		couples = [ ]
+		couples.add = function(index, cpIndex, points) {
+			var hash = [index, cpIndex].sort().join('|')
+				pairIndex = couples['e-' + hash]
+			if (pairIndex >= 0) {
+				couples[pairIndex].points += points
+			}
+			else {
+				couples['e-' + hash] = pairIndex = couples.length
+				couples.push({
+					chars: [index, cpIndex],
+					points: points
+				})
+			}
+			characters[index].couples[cpIndex] = pairIndex
+			characters[cpIndex].couples[index] = pairIndex
+		}
+		getTableData($('#stable', coupleHtml[0])).forEach(function(td, edgeIndex) {
+			var points = parseInt(td[4]),
+				names = td.slice(1, 4)
+			if (points > 2) names.forEach(function(name, i) {
+				var index = characters['i-' + name]
+				if (index >= 0) for (var j = 0; j < i; j ++) {
+					var cpName = names[j],
+						cpIndex = characters['i-' + cpName]
+					// playing with yourself is impossible
+					if (cpIndex >= 0 && index !== cpIndex)
+						couples.add(index, cpIndex, points)
+				}
+			})
+		})
+
+		addModels(characters, couples)
+	})
+
+</script>
+</body>
+</html>
